@@ -1,0 +1,213 @@
+{% extends "layout.njk" %}
+
+{% block pageTitle %}Stop Streaming Response{% endblock %}
+{% block pageHeading %}Stop Streaming Response{% endblock %}
+{% block content %}
+  <p>Gunakan fitur ini untuk menghentikan streaming respon ketika informasi yang dibutuhkan sudah diperoleh.</p>
+  <p>Ini berguna saat Anda ingin menghemat token atau hanya membutuhkan kutipan sebagian dari jawaban model.</p>
+  <section>
+    <form id="stop-streaming-form" class="reasoning-form">
+      <div class="field">
+        <label for="stop-streaming-prompt">Masukkan prompt:</label>
+        <textarea id="stop-streaming-prompt" name="prompt" rows="6" placeholder="Tuliskan instruksi yang ingin diuji dengan streaming..." required></textarea>
+      </div>
+      <div class="toggle">
+        <span class="toggle-label">Reasoning</span>
+        <label class="switch">
+          <input type="checkbox" id="stop-reasoning-toggle" name="reasoning" checked />
+          <span class="slider"></span>
+        </label>
+        <span id="stop-reasoning-state" class="toggle-state">ON</span>
+      </div>
+      <div class="actions">
+        <button type="submit">Mulai Streaming</button>
+        <button type="button" id="stop-streaming-stop" class="button-secondary" disabled>Stop</button>
+        <span id="stop-status" class="status-text"></span>
+      </div>
+    </form>
+  </section>
+  <section style="margin-top: 2rem;">
+    <h2>Streaming Response</h2>
+    <div id="stop-stream-output" class="stream-output"></div>
+  </section>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    (function () {
+      const form = document.getElementById('stop-streaming-form');
+      const promptInput = document.getElementById('stop-streaming-prompt');
+      const output = document.getElementById('stop-stream-output');
+      const status = document.getElementById('stop-status');
+      const submitButton = form.querySelector('button[type="submit"]');
+      const stopButton = document.getElementById('stop-streaming-stop');
+      const reasoningToggle = document.getElementById('stop-reasoning-toggle');
+      const reasoningState = document.getElementById('stop-reasoning-state');
+
+      let source;
+      let buffer = '';
+
+      const closeSource = () => {
+        if (source) {
+          source.close();
+          source = null;
+          stopButton.disabled = true;
+        }
+      };
+
+      const escapeHtml = (value) =>
+        value
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+
+      const formatThinking = (value) =>
+        escapeHtml(value || '').replace(/\n/g, '<br />');
+
+      const renderWithMarked = (text) => {
+        const thinkStart = text.indexOf('<think>');
+        const thinkEnd = text.indexOf('</think>');
+        const hasReasoning = thinkStart !== -1;
+        const reasoningComplete = thinkEnd !== -1;
+
+        if (!reasoningToggle.checked && hasReasoning && !reasoningComplete) {
+          output.innerHTML = '';
+          return;
+        }
+
+        let reasoningContent = '';
+        let answerContent = text;
+
+        if (hasReasoning) {
+          const startIndex = thinkStart + '<think>'.length;
+          const endIndex = reasoningComplete ? thinkEnd : text.length;
+          reasoningContent = text.slice(startIndex, endIndex);
+          const prefixContent = text.slice(0, thinkStart);
+          const suffixContent = reasoningComplete ? text.slice(thinkEnd + '</think>'.length) : '';
+          answerContent = reasoningComplete ? `${prefixContent}${suffixContent}` : prefixContent;
+        }
+
+        let html = '';
+
+        if (reasoningToggle.checked && hasReasoning) {
+          const trimmed = reasoningContent.trim();
+          const thinkingHtml = trimmed
+            ? formatThinking(reasoningContent)
+            : '<em>Model is thinking…</em>';
+
+          html += `
+            <details class="think-block ${reasoningComplete ? 'think-complete' : ''}" ${reasoningComplete ? '' : 'open'}>
+              <summary>Model reasoning</summary>
+              <div>${thinkingHtml}${reasoningComplete ? '' : '<span class="stream-caret"></span>'}</div>
+            </details>
+          `;
+        }
+
+        const shouldShowAnswer =
+          !hasReasoning ||
+          reasoningComplete ||
+          (!reasoningToggle.checked && !hasReasoning);
+
+        if (shouldShowAnswer && answerContent.trim()) {
+          html += marked.parse(answerContent);
+        } else if (!hasReasoning && text.trim()) {
+          html += marked.parse(text);
+        }
+
+        output.innerHTML = html;
+      };
+
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const prompt = promptInput.value.trim();
+
+        if (!prompt) {
+          status.textContent = 'Prompt tidak boleh kosong.';
+          return;
+        }
+
+        closeSource();
+        buffer = '';
+        output.innerHTML = '';
+        status.textContent = 'Meminta respon...';
+        submitButton.disabled = true;
+        stopButton.disabled = false;
+
+        const params = new URLSearchParams({
+          prompt,
+          reasoning: reasoningToggle.checked ? 'on' : 'off',
+        });
+        const url = `/api/stop-streaming?${params.toString()}`;
+        source = new EventSource(url);
+
+        source.addEventListener('message', (messageEvent) => {
+          try {
+            const payload = JSON.parse(messageEvent.data);
+            if (payload.text) {
+              buffer += payload.text;
+              renderWithMarked(buffer);
+            }
+          } catch (error) {
+            console.error('Gagal mem-parsing streaming:', error);
+          }
+        });
+
+        source.addEventListener('end', () => {
+          status.textContent = 'Streaming selesai.';
+          submitButton.disabled = false;
+          stopButton.disabled = true;
+          closeSource();
+        });
+
+        source.addEventListener('config', (configEvent) => {
+          try {
+            const payload = JSON.parse(configEvent.data);
+            status.textContent = payload.reasoningMode === 'on'
+              ? 'Streaming dimulai (Reasoning ON)'
+              : 'Streaming dimulai (Reasoning OFF)';
+          } catch (error) {
+            console.warn('Gagal memproses konfigurasi streaming:', error);
+          }
+        });
+
+        source.addEventListener('error', (errorEvent) => {
+          submitButton.disabled = false;
+          stopButton.disabled = true;
+
+          if (errorEvent.data) {
+            try {
+              const payload = JSON.parse(errorEvent.data);
+              status.textContent = payload.message || 'Terjadi kesalahan.';
+            } catch (error) {
+              status.textContent = 'Terjadi kesalahan saat memproses respon.';
+            }
+          } else {
+            status.textContent = 'Koneksi streaming terputus.';
+          }
+
+          closeSource();
+        });
+      });
+
+      window.addEventListener('beforeunload', closeSource);
+
+      stopButton.addEventListener('click', () => {
+        status.textContent = 'Streaming dihentikan.';
+        closeSource();
+        submitButton.disabled = false;
+      });
+
+      const updateReasoningState = () => {
+        const isOn = reasoningToggle.checked;
+        reasoningState.textContent = isOn ? 'ON' : 'OFF';
+        reasoningState.classList.toggle('is-off', !isOn);
+        if (buffer) {
+          renderWithMarked(buffer);
+        }
+      };
+
+      reasoningToggle.addEventListener('change', updateReasoningState);
+      updateReasoningState();
+    })();
+  </script>
+{% endblock %}

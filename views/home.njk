@@ -1,0 +1,11 @@
+{% extends "layout.njk" %}
+
+{% block pageTitle %}LLM technique{% endblock %}
+{% block pageHeading %}LLM technique{% endblock %}
+{% block content %}
+  <p>Hari ini kita akan belajar on off reasoning model.</p>
+  <p>Mulai dengan memahami kapan reasoning model dibutuhkan, lalu eksplor opsi untuk menyalakan atau mematikannya sesuai skenario.</p>
+  {% if serverUrl %}
+    <p><a href="{{ serverUrl }}">{{ serverUrl }}</a></p>
+  {% endif %}
+{% endblock %}

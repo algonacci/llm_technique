@@ -1,0 +1,28 @@
+{
+  "name": "llm_technique",
+  "version": "1.0.0",
+  "description": "sesuai namanya",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/algonacci/llm_technique.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/algonacci/llm_technique/issues"
+  },
+  "homepage": "https://github.com/algonacci/llm_technique#readme",
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "mysql2": "^3.15.2",
+    "nunjucks": "^3.2.4",
+    "openai": "^6.6.0"
+  }
+}
