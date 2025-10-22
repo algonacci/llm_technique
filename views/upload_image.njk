@@ -1,0 +1,260 @@
+{% extends "layout.njk" %}
+
+{% block pageTitle %}Upload Image{% endblock %}
+{% block pageHeading %}Upload Image{% endblock %}
+{% block content %}
+  <p>Gunakan formulir di bawah ini untuk memilih gambar sambil mencoba streaming response seperti demo stop streaming.</p>
+  <section>
+    <form id="upload-streaming-form" class="upload-form reasoning-form" action="#" enctype="multipart/form-data">
+      <div class="field">
+        <label for="upload-image">Pilih gambar</label>
+        <input id="upload-image" type="file" name="image" accept="image/*" required />
+      </div>
+      <div class="field">
+        <label for="upload-prompt">Masukkan prompt</label>
+        <textarea id="upload-prompt" name="prompt" rows="6" placeholder="Tuliskan instruksi untuk model..." required></textarea>
+      </div>
+      <div class="toggle">
+        <span class="toggle-label">Reasoning</span>
+        <label class="switch">
+          <input type="checkbox" id="upload-reasoning-toggle" name="reasoning" checked />
+          <span class="slider"></span>
+        </label>
+        <span id="upload-reasoning-state" class="toggle-state">ON</span>
+      </div>
+      <div class="actions">
+        <button type="submit">Mulai Streaming</button>
+        <button type="button" id="upload-stop" class="button-secondary" disabled>Stop</button>
+        <span id="upload-status" class="status-text"></span>
+      </div>
+    </form>
+  </section>
+  <section style="margin-top: 2rem;">
+    <h2>Streaming Response</h2>
+    <div id="upload-stream-output" class="stream-output"></div>
+  </section>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    (function () {
+      const form = document.getElementById('upload-streaming-form');
+      const imageInput = document.getElementById('upload-image');
+      const promptInput = document.getElementById('upload-prompt');
+      const output = document.getElementById('upload-stream-output');
+      const status = document.getElementById('upload-status');
+      const submitButton = form.querySelector('button[type="submit"]');
+      const stopButton = document.getElementById('upload-stop');
+      const reasoningToggle = document.getElementById('upload-reasoning-toggle');
+      const reasoningState = document.getElementById('upload-reasoning-state');
+
+      let source;
+      let buffer = '';
+
+      const closeSource = () => {
+        if (source) {
+          source.close();
+          source = null;
+          stopButton.disabled = true;
+        }
+      };
+
+      const escapeHtml = (value) =>
+        value
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+
+      const formatThinking = (value) =>
+        escapeHtml(value || '').replace(/\n/g, '<br />');
+
+      const renderWithMarked = (text) => {
+        const thinkStart = text.indexOf('<think>');
+        const thinkEnd = text.indexOf('</think>');
+        const hasReasoning = thinkStart !== -1;
+        const reasoningComplete = thinkEnd !== -1;
+
+        if (!reasoningToggle.checked && hasReasoning && !reasoningComplete) {
+          output.innerHTML = '';
+          return;
+        }
+
+        let reasoningContent = '';
+        let answerContent = text;
+
+        if (hasReasoning) {
+          const startIndex = thinkStart + '<think>'.length;
+          const endIndex = reasoningComplete ? thinkEnd : text.length;
+          reasoningContent = text.slice(startIndex, endIndex);
+          const prefixContent = text.slice(0, thinkStart);
+          const suffixContent = reasoningComplete ? text.slice(thinkEnd + '</think>'.length) : '';
+          answerContent = reasoningComplete ? `${prefixContent}${suffixContent}` : prefixContent;
+        }
+
+        let html = '';
+
+        if (reasoningToggle.checked && hasReasoning) {
+          const trimmed = reasoningContent.trim();
+          const thinkingHtml = trimmed
+            ? formatThinking(reasoningContent)
+            : '<em>Model is thinking…</em>';
+
+          html += `
+            <details class="think-block ${reasoningComplete ? 'think-complete' : ''}" ${reasoningComplete ? '' : 'open'}>
+              <summary>Model reasoning</summary>
+              <div>${thinkingHtml}${reasoningComplete ? '' : '<span class="stream-caret"></span>'}</div>
+            </details>
+          `;
+        }
+
+        const shouldShowAnswer =
+          !hasReasoning ||
+          reasoningComplete ||
+          (!reasoningToggle.checked && !hasReasoning);
+
+        if (shouldShowAnswer && answerContent.trim()) {
+          html += marked.parse(answerContent);
+        } else if (!hasReasoning && text.trim()) {
+          html += marked.parse(text);
+        }
+
+        output.innerHTML = html;
+      };
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const prompt = promptInput.value.trim();
+
+        if (!imageInput.files.length) {
+          status.textContent = 'Silakan pilih gambar terlebih dahulu.';
+          return;
+        }
+
+        if (!prompt) {
+          status.textContent = 'Prompt tidak boleh kosong.';
+          return;
+        }
+
+        closeSource();
+        buffer = '';
+        output.innerHTML = '';
+        submitButton.disabled = true;
+        stopButton.disabled = true;
+
+        status.textContent = 'Mengunggah gambar...';
+        const formData = new FormData();
+        formData.append('image', imageInput.files[0]);
+
+        let imageId = null;
+
+        try {
+          const uploadResponse = await fetch('/api/upload-image', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!uploadResponse.ok) {
+            const errorPayload = await uploadResponse.json().catch(() => ({}));
+            status.textContent = errorPayload.error || 'Gagal mengunggah gambar.';
+            submitButton.disabled = false;
+            return;
+          }
+
+          const payload = await uploadResponse.json();
+          imageId = payload.imageId;
+
+          if (!imageId) {
+            status.textContent = 'Respon unggahan tidak valid.';
+            submitButton.disabled = false;
+            return;
+          }
+        } catch (error) {
+          console.error('Upload error:', error);
+          status.textContent = 'Terjadi kesalahan saat mengunggah gambar.';
+          submitButton.disabled = false;
+          return;
+        }
+
+        status.textContent = 'Meminta respon...';
+        stopButton.disabled = false;
+
+        const params = new URLSearchParams({
+          prompt,
+          reasoning: reasoningToggle.checked ? 'on' : 'off',
+          imageId,
+        });
+        const url = `/api/upload-streaming?${params.toString()}`;
+        source = new EventSource(url);
+
+        source.addEventListener('message', (messageEvent) => {
+          try {
+            const payload = JSON.parse(messageEvent.data);
+            if (payload.text) {
+              buffer += payload.text;
+              renderWithMarked(buffer);
+            }
+          } catch (error) {
+            console.error('Gagal mem-parsing streaming:', error);
+          }
+        });
+
+        source.addEventListener('end', () => {
+          status.textContent = 'Streaming selesai.';
+          submitButton.disabled = false;
+          stopButton.disabled = true;
+          closeSource();
+        });
+
+        source.addEventListener('config', (configEvent) => {
+          try {
+            const payload = JSON.parse(configEvent.data);
+            status.textContent =
+              payload.reasoningMode === 'on'
+                ? 'Streaming dimulai (Reasoning ON)'
+                : 'Streaming dimulai (Reasoning OFF)';
+          } catch (error) {
+            console.warn('Gagal memproses konfigurasi streaming:', error);
+          }
+        });
+
+        source.addEventListener('error', (errorEvent) => {
+          submitButton.disabled = false;
+          stopButton.disabled = true;
+
+          if (errorEvent.data) {
+            try {
+              const payload = JSON.parse(errorEvent.data);
+              status.textContent = payload.message || 'Terjadi kesalahan.';
+            } catch (error) {
+              status.textContent = 'Terjadi kesalahan saat memproses respon.';
+            }
+          } else {
+            status.textContent = 'Koneksi streaming terputus.';
+          }
+
+          closeSource();
+        });
+      });
+
+      window.addEventListener('beforeunload', closeSource);
+
+      stopButton.addEventListener('click', () => {
+        status.textContent = 'Streaming dihentikan.';
+        closeSource();
+        submitButton.disabled = false;
+      });
+
+      const updateReasoningState = () => {
+        const isOn = reasoningToggle.checked;
+        reasoningState.textContent = isOn ? 'ON' : 'OFF';
+        reasoningState.classList.toggle('is-off', !isOn);
+        if (buffer) {
+          renderWithMarked(buffer);
+        }
+      };
+
+      reasoningToggle.addEventListener('change', updateReasoningState);
+      updateReasoningState();
+    })();
+  </script>
+{% endblock %}

@@ -2,16 +2,20 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const nunjucks = require('nunjucks');
-const OpenAI = require('openai');
+const { OpenAI: LLMClient } = require('openai');
+const crypto = require('crypto');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const VIEWS_DIR = path.join(__dirname, 'views');
 const SERVER_URL = `http://localhost:${PORT}`;
-const openai = new OpenAI({
+const llmClient = new LLMClient({
   apiKey: process.env.LLM_API_KEY,
   baseURL: process.env.LLM_BASE_URL,
 });
+
+const IMAGE_TTL_MS = Number(process.env.UPLOAD_TTL_MS) || 60_000;
 
 // Configure Nunjucks templating with watch enabled for live reload.
 nunjucks.configure(VIEWS_DIR, {
@@ -19,6 +23,23 @@ nunjucks.configure(VIEWS_DIR, {
   express: app,
   watch: true,
 });
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: Number(process.env.UPLOAD_MAX_SIZE) || 5 * 1024 * 1024,
+  },
+});
+const uploadedImages = new Map();
+
+setInterval(() => {
+  const expiration = Date.now() - IMAGE_TTL_MS;
+  for (const [id, record] of uploadedImages.entries()) {
+    if (record.createdAt < expiration) {
+      uploadedImages.delete(id);
+    }
+  }
+}, IMAGE_TTL_MS).unref?.();
 
 app.set('view engine', 'njk');
 app.set('views', VIEWS_DIR);
@@ -42,9 +63,32 @@ app.get('/stop_streaming_response', (req, res) => {
   });
 });
 
+app.get('/upload_image', (req, res) => {
+  res.render('upload_image', {
+    pageId: 'upload_image',
+  });
+});
+
+app.post('/api/upload-image', upload.single('image'), (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'File gambar diperlukan.' });
+    return;
+  }
+
+  const imageId = crypto.randomUUID();
+  uploadedImages.set(imageId, {
+    data: req.file.buffer.toString('base64'),
+    mimeType: req.file.mimetype || 'image/png',
+    createdAt: Date.now(),
+  });
+
+  res.json({ imageId });
+});
+
 const streamResponse = async (req, res) => {
   const prompt = req.query.prompt;
   const reasoningMode = req.query.reasoning === 'off' ? 'off' : 'on';
+  const imageId = req.query.imageId;
 
   if (!prompt) {
     res.status(400).json({ error: 'Prompt is required' });
@@ -61,6 +105,51 @@ const streamResponse = async (req, res) => {
     return;
   }
 
+  let modelName = (process.env.LLM_MODEL_NAME || '').trim();
+  const supportsVision =
+    (process.env.LLM_SUPPORTS_VISION || '').toLowerCase() === 'true';
+
+  let userMessage = {
+    role: 'user',
+    content: prompt,
+  };
+
+  if (imageId) {
+    const imageRecord = uploadedImages.get(imageId);
+
+    if (!imageRecord) {
+      res.status(400).json({ error: 'Gambar tidak ditemukan atau kadaluwarsa.' });
+      return;
+    }
+
+    if (supportsVision) {
+      userMessage = {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${imageRecord.mimeType};base64,${imageRecord.data}`,
+            },
+          },
+        ],
+      };
+
+    } else {
+      const approxBytes = Math.ceil((imageRecord.data.length * 3) / 4);
+      userMessage = {
+        role: 'user',
+        content: `${prompt}\n\n---\nGambar dikodekan dalam Base64 (${imageRecord.mimeType}, ~${approxBytes} byte):\n${imageRecord.data}`,
+      };
+    }
+  }
+
+  if (!modelName) {
+    res.status(500).json({ error: 'LLM model belum dikonfigurasi.' });
+    return;
+  }
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -68,6 +157,12 @@ const streamResponse = async (req, res) => {
   if (typeof res.flushHeaders === 'function') {
     res.flushHeaders();
   }
+
+  req.on('close', () => {
+    if (imageId) {
+      uploadedImages.delete(imageId);
+    }
+  });
 
   const sendEvent = (event, data) => {
     const payload = data !== undefined ? `data: ${JSON.stringify(data)}\n\n` : '\n';
@@ -82,11 +177,11 @@ const streamResponse = async (req, res) => {
       : 'You are a helpful assistant. You may think through the task and include your reasoning inside <think>...</think> before the final answer.';
 
   try {
-    const stream = await openai.chat.completions.create({
-      model: process.env.LLM_MODEL_NAME || 'gpt-4o-mini',
+    const stream = await llmClient.chat.completions.create({
+      model: modelName,
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
+        userMessage,
       ],
       max_tokens: Number(process.env.LLM_MAX_TOKENS) || 4096,
       stream: true,
@@ -101,15 +196,26 @@ const streamResponse = async (req, res) => {
 
     sendEvent('end', {});
   } catch (error) {
-    console.error('OpenAI streaming error:', error);
-    sendEvent('error', { message: 'Terjadi kesalahan saat memanggil model.' });
+    const errorDetails =
+      error?.error?.message ||
+      error?.response?.data?.error?.message ||
+      error?.response?.data?.message ||
+      error?.message ||
+      'Terjadi kesalahan saat memanggil model.';
+
+    console.error('LLM streaming error:', error);
+    sendEvent('error', { message: errorDetails });
   } finally {
+    if (imageId) {
+      uploadedImages.delete(imageId);
+    }
     res.end();
   }
 };
 
 app.get('/api/reasoning', streamResponse);
 app.get('/api/stop-streaming', streamResponse);
+app.get('/api/upload-streaming', streamResponse);
 
 app.listen(PORT, () => {
   console.log(`Server listening on ${SERVER_URL}`);
